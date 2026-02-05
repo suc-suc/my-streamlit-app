@@ -1,7 +1,18 @@
 import streamlit as st
+import numpy as np
 
-# 模拟 10 位用户数据
-USERS = {
+# ====== Step 1: 模拟从第三方获取用户 embedding ======
+def get_mock_embedding(uid: str, dim: int = 128) -> list:
+    """
+    模拟调用第三方 embedding 服务。
+    实际使用时，可替换为读取预计算文件或调用内部 API。
+    """
+    np.random.seed(hash(uid) % (2**32))  # 固定种子，保证一致性
+    return np.random.rand(dim).round(4).tolist()
+
+
+# ====== Step 2: 原始用户数据 ======
+RAW_USERS = {
     "U001": {"name": "张先生", "vin": "LSVAB2024XXXXXX", "model": "宏光 PLUS 2020款", "mileage": 86200, "last_maint": "2026-01-28", "location": "上海浦东", "notes": "客户备注: “这车是不是该换了？”", "maint_records": [{"date": "2026-01-28", "item": "更换底盘衬套", "cost": 1280}], "app_events": [{"time": "2026-02-01 10:23", "event": "打开「置换补贴」页面"}]},
     "U002": {"name": "李女士", "vin": "LZWADAGA3XXXXXX", "model": "五菱宏光 MINIEV 2021款", "mileage": 42000, "last_maint": "2026-02-01", "location": "广州天河", "notes": "多次咨询续航问题", "maint_records": [{"date": "2026-02-01", "item": "电池健康检测", "cost": 0}], "app_events": [{"time": "2026-02-03 14:10", "event": "搜索「MINIEV 升级版」"}]},
     "U003": {"name": "王先生", "vin": "LJDDAA225XXXXXX", "model": "星辰 2022款", "mileage": 68000, "last_maint": "2025-11-15", "location": "成都武侯", "notes": "保险到期未续", "maint_records": [{"date": "2025-11-15", "item": "常规保养", "cost": 320}], "app_events": []},
@@ -14,7 +25,13 @@ USERS = {
     "U010": {"name": "郑先生", "vin": "LJDDAA229XXXXXX", "model": "宏光 PLUS 2022款", "mileage": 55000, "last_maint": "2026-01-23", "location": "西安雁塔", "notes": "对车辆性能有要求", "maint_records": [{"date": "2026-01-23", "item": "制动系统检查", "cost": 300}], "app_events": [{"time": "2026-02-02 14:15", "event": "阅读技术文档"}]}
 }
 
-# 初始化状态
+# 注入 embedding
+USERS = {}
+for uid, data in RAW_USERS.items():
+    USERS[uid] = {**data, "embd": get_mock_embedding(uid, dim=128)}
+
+
+# ====== 初始化状态 ======
 if 'current_page' not in st.session_state:
     st.session_state.current_page = "user_list"
 if 'selected_user_id' not in st.session_state:
@@ -22,9 +39,10 @@ if 'selected_user_id' not in st.session_state:
 if 'page_num' not in st.session_state:
     st.session_state.page_num = 1
 if 'call_result' not in st.session_state:
-    st.session_state.call_result = {}  # {uid: "interested" | "declined"}
+    st.session_state.call_result = {}
 
-# 侧边栏导航
+
+# ====== 侧边栏 ======
 with st.sidebar:
     st.title("🧭 导航")
     if st.button("🏠 用户管理中心"):
@@ -34,26 +52,26 @@ with st.sidebar:
     if st.session_state.selected_user_id and st.button("👤 客户详情"):
         st.session_state.current_page = "user_detail"
 
-    # AI 和触达页的导航（可选，保持简洁也可删）
     if st.session_state.current_page == "ai_result":
         st.button("🔍 AI分析结果", disabled=True)
     if st.session_state.current_page == "touch_page":
         st.button("📞 触达分发", disabled=True)
 
-    # ✅ 新增：重置所有状态按钮
     st.divider()
     if st.button("🔄 重置所有状态", type="secondary"):
-        # 清除关键状态
         st.session_state.call_result = {}
         st.session_state.selected_user_id = None
         st.session_state.current_page = "user_list"
-        st.session_state.page_num = 1  # 可选：重置回第一页
+        st.session_state.page_num = 1
         st.rerun()
 
-st.title("🚗 高潜客户识别系统 Demo")
-st.caption("*模拟界面 · 数据脱敏*")
 
-# ========== 用户管理中心（带分页） ==========
+# ====== 主标题 ======
+st.title("🚗 高潜客户识别系统 Demo")
+st.caption("*模拟界面 · 数据脱敏 · 已集成用户 Embedding*")
+
+
+# ========== 用户列表页 ==========
 if st.session_state.current_page == "user_list":
     st.subheader(f"👥 基盘客户池（共 {len(USERS)} 位）")
     
@@ -76,7 +94,6 @@ if st.session_state.current_page == "user_list":
             color = "green" if status == "interested" else ("red" if status == "declined" else "gray")
             st.markdown(f"<span style='color:{color}; font-weight:bold;'>{status}</span>", unsafe_allow_html=True)
         
-        # ✅ 关键修复：按钮独立一行 + 唯一 key
         btn_key = f"userlist_p{st.session_state.page_num}_i{idx}_u{uid}"
         if st.button(f"👤 查看 {user['name']} 详情", key=btn_key):
             st.session_state.selected_user_id = uid
@@ -85,7 +102,6 @@ if st.session_state.current_page == "user_list":
         
         st.divider()
 
-    # 分页控件
     col_prev, col_center, col_next = st.columns([1, 2, 1])
     with col_prev:
         if st.session_state.page_num > 1:
@@ -132,23 +148,53 @@ elif st.session_state.current_page == "user_detail":
     else:
         st.info("该用户暂无 APP 行为记录")
 
+    with st.expander("🔍 用户 Embedding (128维，前10维)"):
+        st.code(str(user['embd'][:10]))
+
     st.divider()
     if st.button("🔍 AI 智能分析（评估换购倾向）"):
         st.session_state.current_page = "ai_result"
         st.rerun()
     if st.button("← 返回客户列表"):
         st.session_state.current_page = "user_list"
-        # ✅ 不重置 page_num，保持当前位置
         st.rerun()
 
-# ========== AI 分析结果页 ==========
+# ========== AI 分析结果页（支持低潜用户手动触达）==========
 elif st.session_state.current_page == "ai_result":
     user = USERS[st.session_state.selected_user_id]
-    score_map = {"U001": 82, "U002": 76, "U004": 70, "U006": 68, "U007": 65, "U009": 55, "U010": 72, "U003": 45, "U005": 58, "U008": 60}
+    
+    # 评分映射（U003 明确为低潜）
+    score_map = {
+        "U001": 82, "U002": 76, "U004": 70, "U006": 68,
+        "U007": 65, "U009": 55, "U010": 72,
+        "U003": 45,   # 低潜
+        "U005": 58,   # 中潜
+        "U008": 60    # 中潜
+    }
     score = score_map.get(st.session_state.selected_user_id, 50)
-    status_label = "高潜" if score >= 70 else ("中潜" if score >= 50 else "低潜")
+    
+    # 分层判断
+    if score >= 70:
+        status_label = "高潜"
+        status_color = "#2E8B57"  # 深绿
+        recommendation = "强烈推荐触达"
+    elif score >= 50:
+        status_label = "中潜"
+        status_color = "#FF8C00"  # 橙色
+        recommendation = "可谨慎触达"
+    else:
+        status_label = "低潜"
+        status_color = "#DC143C"  # 深红
+        recommendation = "不建议触达（需人工确认）"
 
-    st.success(f"⭐ AI 评估得分：{score} / 100 → **{status_label}客户**")
+    # 显示评分与标签
+    st.markdown(
+        f"<h3>⭐ AI 评估得分：<span style='color:{status_color}; font-weight:bold;'>{score} / 100</span> → "
+        f"<span style='color:{status_color}; font-weight:bold;'>{status_label}客户</span></h3>",
+        unsafe_allow_html=True
+    )
+    st.caption(f"💡 AI 建议：{recommendation}")
+
     st.subheader("主导原因")
     reasons = {
         "U001": "- 车龄老化 + 明确换车意向\n- APP 浏览置换页面",
@@ -158,9 +204,9 @@ elif st.session_state.current_page == "ai_result":
         "U007": "- 预算有限但仍考虑换车\n- 关注优惠活动",
         "U009": "- 希望升级到更高配置\n- 询问升级方案",
         "U010": "- 对车辆性能有要求\n- 阅读技术文档",
-        "U003": "- 无 APP 行为\n- 保险断档",
-        "U005": "- 车龄老、里程高\n- 抱怨产品力",
-        "U008": "- 关注保值率\n- 查看二手车行情"
+        "U003": "- 无 APP 行为\n- 保险断档超2个月\n- 近6个月无换购相关信号",
+        "U005": "- 车龄老（5年+）、里程高（10万+）\n- 抱怨产品力但无主动升级行为",
+        "U008": "- 关注保值率\n- 查看二手车行情（可能卖车而非换本品牌）"
     }
     st.markdown(reasons.get(st.session_state.selected_user_id, "- 综合用车行为分析"))
 
@@ -176,15 +222,30 @@ elif st.session_state.current_page == "ai_result":
         - 推送专属车型对比报告  
         - 邀请参加线下品鉴会
         """)
+    else:  # 低潜
+        st.warning("⚠️ AI 判断该用户当前无明显换购意向，**默认不建议主动电话触达**。")
+        st.markdown("""
+        - 如您有额外信息（如线下接触、熟人推荐），可**手动发起触达**
+        - 系统将记录此次操作，用于后续模型优化
+        """)
 
-    if st.button("📞 生成触达任务（电话沟通）"):
-        st.session_state.current_page = "touch_page"
-        st.rerun()
+    # === 关键修改：所有用户都显示按钮，但低潜加二次确认 ===
+    if status_label == "低潜":
+        with st.expander("❗ 手动触发触达（低潜用户）", expanded=False):
+            st.warning("您即将对一位低潜客户发起电话沟通，此操作将覆盖AI建议。")
+            if st.button("📞 强制生成触达任务（人工覆盖）", type="primary"):
+                st.session_state.current_page = "touch_page"
+                st.rerun()
+    else:
+        if st.button("📞 生成触达任务（电话沟通）"):
+            st.session_state.current_page = "touch_page"
+            st.rerun()
+    
     if st.button("← 返回客户详情"):
         st.session_state.current_page = "user_detail"
         st.rerun()
 
-# ========== 触达分发页（电话沟通） ==========
+# ========== 触达分发页 ==========
 elif st.session_state.current_page == "touch_page":
     user = USERS[st.session_state.selected_user_id]
     uid = st.session_state.selected_user_id
@@ -211,7 +272,6 @@ elif st.session_state.current_page == "touch_page":
                 st.session_state.current_page = "ai_result"
                 st.rerun()
         else:
-            # 生成详细地点
             detailed_location = {
                 "上海浦东": "上海浦东金桥",
                 "广州天河": "广州天河体育中心",
