@@ -1,0 +1,988 @@
+import cv2
+import numpy as np 
+import matplotlib.pylab as plt 
+from skimage.filters import gaussian 
+from skimage import io,data 
+from skimage import img_as_ubyte 
+from PIL import Image 
+import imutils 
+import pytesseract 
+import math 
+import sys,os 
+import copy
+import requests
+from io import BytesIO
+import csv
+import re
+import multiprocessing as mp
+from multiprocessing import Process,Lock,Manager,Array
+#from sklearn.externals import joblib
+import joblib
+from scipy import optimize
+import time
+
+class DrivingLicence(object):
+    model1 = None
+    model2 = None
+    
+    def __init__(self):
+        self.model1 = joblib.load('newModel_10.m')
+        self.model2 = joblib.load('newModel_18.m')
+        self = None
+        
+    def findPoint(self, cnt, x, y):
+        maxL = 10000000
+        index = -1
+        for i in range(len(cnt)):
+            tempX = cnt[i][0][0]
+            tempY = cnt[i][0][1]
+            dis = abs(x-tempX) + abs(y-tempY)
+            if dis < maxL:
+                maxL = dis
+                index = i
+        return [cnt[index][0][0], cnt[index][0][1]]
+
+    def findCarLicenseContours(self, binary):    
+        index = -1
+        maxArea = -1
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        #print(len(contours))
+        for i in range(len(contours)):
+            area = cv2.contourArea(contours[i])
+            if area > maxArea:
+                maxArea = area
+                index = i
+        if index == -1:
+            return []
+        cnt = contours[index]
+        p1 = self.findPoint(cnt, 0, 0)
+        p3 = self.findPoint(cnt, binary.shape[1]-1, 0)
+        p2 = self.findPoint(cnt, 0, binary.shape[0]-1)
+        p4 = self.findPoint(cnt, binary.shape[1]-1, binary.shape[0]-1)
+
+        temp1 = binary[0: int(binary.shape[0]/2), 0: int(binary.shape[1]/2)]
+        temp2 = binary[0: int(binary.shape[0]/2), int(binary.shape[1]/2):]
+        temp3 = binary[int(binary.shape[0]/2):, 0: int(binary.shape[1]/2)]
+        temp4 = binary[int(binary.shape[0]/2):, int(binary.shape[1]/2):]
+        sum1 = temp1.sum()
+        sum2 = temp2.sum()
+        sum3 = temp3.sum()
+        sum4 = temp4.sum()
+        if sum1 == min(sum1, sum2, sum3, sum4):
+            p1 = [p3[0]+p2[0]-p4[0], p3[1]+p2[1]-p4[1]]
+        if sum2 == min(sum1, sum2, sum3, sum4):
+            p3 = [p1[0]+p4[0]-p2[0], p1[1]+p4[1]-p2[1]]
+        if sum3 == min(sum1, sum2, sum3, sum4):
+            p2 = [p1[0]+p4[0]-p3[0], p1[1]+p4[1]-p3[1]]
+        if sum4 == min(sum1, sum2, sum3, sum4):
+            p4 = [p2[0]+p3[0]-p1[0], p2[1]+p3[1]-p1[1]]
+        box = [p2, p1, p3, p4]
+        #print(box)
+        return box
+
+    def correctContours(self, image, l_hsv, h_hsv):
+        image_HSV = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+        mask = cv2.inRange(image_HSV, l_hsv, h_hsv)
+        mask = cv2.medianBlur(mask, 5)
+        mask = cv2.medianBlur(mask, 5)
+        box = self.findCarLicenseContours(mask)
+        sub_image = self.subImage(image, box)
+        #print('correctContours')
+        #plt.imshow(sub_image)
+        #plt.show()
+        return sub_image
+    
+    def getScale(self, img):
+        (h, w, _) = img.shape
+        d = max(h, w)
+        return (1400.0 / d)
+    
+    def isVaildDate(self, date):
+        try:
+            if ":" in date:
+                time.strptime(date, "%Y-%m-%d %H:%M:%S")
+            else:
+                time.strptime(date, "%Y-%m-%d")
+            return True
+        except:
+            return False
+
+    def check_id_num(self, arr):
+        if len(arr) < 15:
+            return False
+        area={"11":"北京","12":"天津","13":"河北","14":"山西","15":"内蒙古","21":"辽宁","22":"吉林",\
+              "23":"黑龙江","31":"上海","32":"江苏","33":"浙江","34":"安徽","35":"福建","36":"江西",\
+              "37":"山东","41":"河南","42":"湖北","43":"湖南","44":"广东","45":"广西","46":"海南",\
+              "50":"重庆","51":"四川","52":"贵州","53":"云南","54":"西藏","61":"陕西","62":"甘肃",\
+              "63":"青海","64":"宁夏","65":"新疆","71":"台湾","81":"香港","82":"澳门","91":"国外"}
+        if ((arr)[0:2] in list(area)) == False:
+            return False
+        #地区校验
+        if(not area[(arr)[0:2]]):
+            return False
+        div = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+        check = [1, 0, 10, 9, 8, 7, 6, 5, 4, 3, 2]
+        temp = filter(lambda ch: ch in '0123456789xX', arr)
+        arr = ''.join(list(temp))
+        base = 0
+        if 'x' in arr or 'X' in arr:
+            base = 10
+        arr = arr.replace('x', '0')
+        arr = arr.replace('X', '0')
+        if arr.isdigit() is True:
+            if len(arr) == 18:
+                d = int(arr[6])*1000 + int(arr[7])*100 + int(arr[8])*10 + int(arr[9])
+                if d > 2100:
+                    return False
+                if d < 1949:
+                    return False
+                d = int(arr[10])*10 + int(arr[11])
+                if (d < 1) or (d > 12):
+                    return False
+                day = arr[6]+arr[7]+arr[8]+arr[9]+'-'+arr[10]+arr[11]+'-'+arr[12]+arr[13]
+                if self.isVaildDate(day) == False:
+                    return False
+                total = 0
+                for i in range(17):
+                    total += int(arr[i]) * div[i]
+                if int(arr[17]) + base == check[total % 11]:
+                    return True
+                else:
+                    return False
+            else:
+                return False
+        else:
+            return False
+
+    def getExtensionPoint(self, p1, p2, L, p3):
+        temp1 = np.array([p1[0], p1[1]])
+        temp2 = np.array([p2[0], p2[1]])
+        temp = temp1 - temp2
+        if temp[0] == 0:
+            if temp[1] < 0:
+                return [p3[0], p3[1]-L]
+            else:
+                return [p3[0], p3[1]+L]
+        k = math.atan(temp[1]/temp[0])
+        s = abs(math.sin(k))
+        c = abs(math.cos(k))
+        dx = 0
+        dy = 0
+        if temp[0]*temp[1] > 0:
+            if temp[0] > 0:
+                dy = s*abs(L)+0.5
+                dx = c*abs(L)+0.5
+            else:
+                dy = -s*abs(L)-0.5
+                dx = -c*abs(L)-0.5
+        else:
+            if temp[0] > 0:
+                dy = -s*abs(L)-0.5
+                dx = c*abs(L)+0.5
+            else:
+                dy = s*abs(L)+0.5
+                dx = -c*abs(L)-0.5
+        x = p3[0] + dx
+        y = p3[1] + dy
+        return [x, y]
+
+    def translationImage(self, image, x, y):
+        M = np.float32([[1, 0, x], [0, 1, y]])
+        image = cv2.warpAffine(image, M, (image.shape[1], image.shape[0]))
+        return image
+
+    def removeSmallLine(self, temp, maxLen):
+        h, _ = temp.shape
+        for i in range(h):
+            contours, _ = cv2.findContours(temp[i], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for j in range(len(contours)):
+                cnt = contours[j]
+                rect = cv2.minAreaRect(cnt)
+                box = cv2.boxPoints(rect)
+                box = np.int0(box)
+                bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)+1
+                if bound2 < maxLen:
+                    cv2.drawContours(temp[i], [contours[j]], 0, 0, -1)
+        return temp
+
+    def addressGetImage(self, path):
+        response = requests.get(path)
+        image = Image.open(BytesIO(response.content))
+        #image = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+        image = np.array(image)
+        return image
+
+    def findDrivingCardArea(self, img):
+        region = []
+        contours, image = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            cnt = contours[i]
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound1 = math.sqrt((box[0][0]-box[1][0])**2 + (box[0][1] - box[1][1])**2)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)
+            height = min(bound1, bound2)
+            width = max(bound1, bound2)
+            if height == 0:
+                continue
+            if width/height > 3:
+                continue
+            region.append(box)
+        return region
+
+    def getDrivingCardIDArea(self, dst):
+        region = []
+        contours, _ = cv2.findContours(dst, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            cnt = contours[i]
+            area = cv2.contourArea(cnt)
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound1 = math.sqrt((box[0][0]-box[1][0])**2 + (box[0][1] - box[1][1])**2)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)
+            height = min(bound1, bound2)
+            width = max(bound1, bound2)
+            if width < 5*18:
+                continue
+            if (height * 7 > width):
+                continue
+            if (height * 22 < width):
+                continue
+            region.append(box)
+        return region
+
+    def subImage(self, img, Box):
+        orignal_W = math.ceil(np.sqrt((Box[0][0] - Box[3][0])**2 + (Box[0][1] - Box[3][1])**2)) 
+        orignal_H = math.ceil(np.sqrt((Box[0][0] - Box[1][0])**2 + (Box[0][1] - Box[1][1])**2))
+        pts1 = np.float32([Box[1], Box[2], Box[0], Box[3]])
+        if(orignal_H > orignal_W):
+            pts1 = np.float32([Box[2], Box[3], Box[1], Box[0]])
+        pts2 = np.float32([[0,0],[max(orignal_H,orignal_W),0],[0,min(orignal_H,orignal_W)],\
+                           [max(orignal_H,orignal_W),min(orignal_H,orignal_W)]])
+        M = cv2.getPerspectiveTransform(pts1, pts2)
+        sub_img = cv2.warpPerspective(img, M, (max(orignal_H, orignal_W), min(orignal_H, orignal_W)))
+        return sub_img
+
+    def diffImage(self, image):
+        h, w, _ = image.shape
+        img = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        imgTemp = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+        left = self.translationImage(img, -int(w/80), 0)
+        right = self.translationImage(img, int(w/80), 0)
+        add_left = cv2.addWeighted(img, 0.5, left, 0.5, 0)
+        add_right = cv2.addWeighted(img, 0.5, right, 0.5, 0)
+        img = (img*0.4 + add_left*0.3 + add_right*0.3)
+        img = np.trunc(img)
+        img = img.astype(int)
+        img = Image.fromarray(img.astype(np.uint8))
+        img = np.array(img)
+        dst = cv2.absdiff(imgTemp, img)
+        return dst
+
+    def correctionBox(self, Box):
+        w = math.ceil(np.sqrt((Box[0][0] - Box[3][0])**2 + (Box[0][1] - Box[3][1])**2)) 
+        h = math.ceil(np.sqrt((Box[0][0] - Box[1][0])**2 + (Box[0][1] - Box[1][1])**2))
+        if w > h:
+            if Box[0][0] == Box[1][0]:
+                Box[0][1] = Box[0][1]+int(h/10)+1
+                Box[1][1] = Box[1][1]-int(h/10)-1
+                Box[3][1] = Box[0][1]+int(h/10)+1
+                Box[2][1] = Box[1][1]-int(h/10)-1
+            else:
+                Box[0] = self.getExtensionPoint(Box[0], Box[1], h/10+0.5, Box[0])
+                Box[1] = self.getExtensionPoint(Box[1], Box[0], h/10+0.5, Box[1])
+                Box[3] = self.getExtensionPoint(Box[0], Box[1], h/10+0.5, Box[3])
+                Box[2] = self.getExtensionPoint(Box[1], Box[0], h/10+0.5, Box[2])
+        else:
+            Box[0] = self.getExtensionPoint(Box[0], Box[3], w/10+0.5, Box[0])
+            Box[1] = self.getExtensionPoint(Box[1], Box[2], w/10+0.5, Box[1])
+            Box[3] = self.getExtensionPoint(Box[3], Box[0], w/10+0.5, Box[3])
+            Box[2] = self.getExtensionPoint(Box[2], Box[1], w/10+0.5, Box[2])
+        Box = np.int0(Box)
+        return Box
+
+    def cutImage(self, h, image, threshold):
+        dis = 10000000
+        X = -1
+        start = -1
+        end = -1
+        for i in range(len(h)-1, -1, -1):
+            if h[i][1] > threshold:
+                x = int(h[i][0]+h[i][1]/2)
+                if (abs(x-image.shape[1]/2) < dis) and (abs(x-image.shape[1]/2) > image.shape[1]/5):
+                    dis = abs(x-image.shape[1]/2)
+                    X = x
+        if X != -1:
+            if X < image.shape[1]/2:
+                start = X
+                end = image.shape[1] - 1
+                image = image[:, X:]
+            else:
+                start = 0
+                end = X
+                image = image[:, 0: X]
+        return image, start, end
+    
+    def doubleCutImage(self, image, x, y, value, d):
+        X = x[0: int(value*d)]
+        start1 = self.findMIN(X, y)
+        X = x[len(x)-1-value: len(x)]
+        end1 = self.findMIN(X, y)
+        #print(start, end)
+        X = x[0: int(value)]
+        start2 = self.findMIN(X, y)
+        X = x[len(x)-1-int(value*d): len(x)]
+        end2 = self.findMIN(X, y)
+        return image[:, start1: end1+1], image[:, start2: end2+1]
+
+    def correctionImage(self, image):
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 2*(int(image.shape[0]/2))+1, 2)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            area = cv2.contourArea(contours[i])
+            if area < binary.shape[0]*binary.shape[1]/(15*15):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+        
+        tt = binary.sum(axis=0)
+        zero = (tt != 0)
+        indices_zero = np.arange(len(tt))[zero]
+        if len(indices_zero) != 0:
+            binary = binary[:, indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+            image = image[:, indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 2*(int(image.shape[0]/2))+1, 2)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            cnt = contours[i]
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound1 = math.sqrt((box[0][0]-box[1][0])**2 + (box[0][1] - box[1][1])**2)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)
+            l = max(bound1, bound2)
+            area = cv2.contourArea(cnt)
+            if (area < binary.shape[0]*binary.shape[1]/(15*15)) and (l < image.shape[0]/2):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+        tt = binary.sum(axis=0)
+        tt = np.uint8(tt>0)*255
+        tt = tt.reshape(1, len(tt))
+        tt = 255 - tt
+        contours, _ = cv2.findContours(tt, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        h = []
+        for i in range(len(contours)):
+            cnt = contours[i]
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)+1
+            h.append([box[0][0], bound2])
+        if len(h) == 0:
+            return image
+        h = np.array(h)
+        h = h[np.lexsort(h.T)]
+    #     print(h)
+        imageList = []
+        position = []
+        
+        gray = 255 - gray
+        y = gray.sum(axis=0)
+        x = np.arange(len(y))
+        #plt.figure(figsize=(20, 5))
+        #plt.plot(x, y)
+        #plt.show()
+        value = int((len(y)/36)*1.1+0.5)
+        temp1, temp2 = self.doubleCutImage(image, x, y, value, 2)
+        imageList.append(temp1)
+        imageList.append(temp2)
+        temp3, temp4 = self.doubleCutImage(image, x, y, value, 8)
+        imageList.append(temp3)
+        imageList.append(temp4)
+        
+        value = [1000, image.shape[0]/2, image.shape[0]/4, image.shape[0]/3, image.shape[0]/6, image.shape[0]/8, image.shape[0]/10]
+        for i in range(len(value)):
+            image, start, end = self.cutImage(h, image, value[i])
+            if ([start, end] in position):
+                continue
+            position.append([start, end])
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 2*(int(image.shape[0]/2))+1, 2)
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for i in range(len(contours)):
+                cnt = contours[i]
+                area = cv2.contourArea(cnt)
+                if area < binary.shape[0]*binary.shape[1]/(15*15):
+                    cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+            tt = binary.sum(axis=1)
+            zero = (tt != 0)
+            indices_zero = np.arange(len(tt))[zero]
+            if len(indices_zero) != 0:
+                if indices_zero[0] == 0:
+                    image = image[indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+                else:
+                    image = image[indices_zero[0]-1: indices_zero[len(indices_zero)-1]+1]
+            imageList.append(image)
+        return imageList
+
+    def findMIN(self, x, y):
+        x = np.array(x)
+        #print(x)
+        index = 0
+        minValue = 10000000
+        for i in range(len(x)):
+            if y[x[i]] < minValue:
+                minValue = y[x[i]]
+                index = x[i]
+        return index
+
+    def isMIN(self, y, i, front, back, value):
+        start = i - front
+        end = i + back + 1
+        if start < 0:
+            start = 0
+        if end > len(y):
+            end = len(y)
+        for i in range(start, end):
+            if i == 0:
+                continue
+            if y[i] < value:
+                return False
+        return True
+
+    def isLegal(self, y, start, end):
+        temp = y[start: end]
+        maxValue = max(temp)
+        if y[end] == 0:
+            return False
+        if maxValue/y[end] > 1.1:
+            return True
+        return False
+    
+    def isOne(self, gray):
+        _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_OTSU|cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            area = cv2.contourArea(contours[i])
+            if area < binary.shape[0]*binary.shape[1]/36:
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+        binary = self.standardizingImage(binary)
+        imageList = []
+        imageList.append(binary)
+        number1, number2 = self.getNumber(imageList)
+        if (number1 == '1') or (number2 == '1'):
+            return True
+        return False
+
+    def findBreakPoint(self, gray, x, y):
+        med = int(len(y)/36)
+        #print('med:', med, int(med/2), len(y)-int(med/2), int(med/3+0.5))
+        xList = []
+        xList.append([0, y[0]])
+        for i in range(int(med/2), len(y)-int(med/2)):
+            if (y[i]<y[i-1]) and (y[i]<y[i+1]):
+                if i + int(med/3+0.5) > len(y)-int(med/2):
+#                     flag1 = self.isMIN(y, i, int(med), int(med), y[i])
+#                     flag2 = self.isOne(gray[:, i:])
+#                     if flag1 and flag2:
+#                         xList.append([i, y[i]])
+                    continue
+                if ((xList[len(xList)-1][0]+1.0*med) >= i) and ((xList[len(xList)-1][0]+0.5*med) < i):
+                    flag1 = self.isMIN(y, i, int(med/2), int(med), y[i])
+                    if flag1 and self.isLegal(y, xList[len(xList)-1][0], i):
+                        xList.append([i, y[i]])
+                if ((xList[len(xList)-1][0]+1.0*med) < i) and ((xList[len(xList)-1][0]+2*med) > i):
+                    flag1 = self.isMIN(y, i, int(med/2), int(med/1.2+0.5), y[i])
+                    if flag1 and self.isLegal(y, xList[len(xList)-1][0], i):
+                        xList.append([i, y[i]])
+                if ((xList[len(xList)-1][0]+2*med) <= i) and ((xList[len(xList)-1][0]+3.5*med) > i):
+                    flag1 = self.isMIN(y, i, int(med), int(med/2), y[i])
+                    if flag1 and self.isLegal(y, xList[len(xList)-1][0], i):
+                        xList.append([i, y[i]])
+                if ((xList[len(xList)-1][0]+3.5*med) <= i):
+                    flag1 = self.isMIN(y, i, 2*int(med), int(med/2), y[i])
+                    if flag1 and self.isLegal(y, xList[len(xList)-1][0], i):
+                        xList.append([i, y[i]])
+            if (y[i]==y[i-1]) and (y[i]<y[i+1]):
+                if i + int(med/3+0.5) > len(y)-int(med/2):
+#                     flag1 = self.isMIN(y, i, int(med), int(med), y[i])
+#                     flag2 = self.isOne(gray[:, i:])
+#                     if flag1 and flag2:
+#                         xList.append([i, y[i]])
+                    continue
+                if ((xList[len(xList)-1][0]+1.0*med) >= i) and ((xList[len(xList)-1][0]+0.5*med) < i):
+                    flag1 = self.isMIN(y, i, int(med/2), int(med), y[i])
+                    if flag1 and self.isLegal(y, xList[len(xList)-1][0], i):
+                        xList.append([i, y[i]])
+                if ((xList[len(xList)-1][0]+1.0*med) < i) and ((xList[len(xList)-1][0]+2*med) > i):
+                    flag1 = self.isMIN(y, i, int(med/2), int(med/1.2+0.5), y[i])
+                    if flag1 and self.isLegal(y, xList[len(xList)-1][0], i):
+                        xList.append([i, y[i]])
+                if ((xList[len(xList)-1][0]+2*med) <= i) and ((xList[len(xList)-1][0]+3.5*med) > i):
+                    flag1 = self.isMIN(y, i, int(med), int(med/2), y[i])
+                    if flag1 and self.isLegal(y, xList[len(xList)-1][0], i):
+                        xList.append([i, y[i]])
+                if ((xList[len(xList)-1][0]+3.5*med) <= i):
+                    flag1 = self.isMIN(y, i, 2*int(med), int(med/2), y[i])
+                    if flag1 and self.isLegal(y, xList[len(xList)-1][0], i):
+                        xList.append([i, y[i]])
+        #xList.append([len(y)-1, y[len(y)-1]])
+        xList = np.array(xList)
+        xList = xList[1:]
+        if len(xList) < 17:
+            return xList
+        xList = xList[np.lexsort(xList.T)]
+        result = []
+        result.append([0, y[0]])
+        for i in range(17):
+            result.append(xList[i])
+        result.append([len(y)-1, y[len(y)-1]])
+        result = np.array(result)
+        return result
+
+    def spiltImage1(self, image):
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+#         _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_OTSU|cv2.THRESH_BINARY_INV)
+#         if int(binary.shape[0]/10) > 0:
+#             ele1 = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(binary.shape[0]/10)))
+#             binary = cv2.dilate(binary, ele1, iterations=1)
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 2*(int(image.shape[0]/2))+1, 2)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            area = cv2.contourArea(contours[i])
+            if area < binary.shape[0]*binary.shape[1]/(20*20):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            cnt = contours[i]
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound1 = math.sqrt((box[0][0]-box[1][0])**2 + (box[0][1] - box[1][1])**2)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)
+            maxL = max(bound1, bound2)
+            minL = min(bound1, bound2)
+            tempY = (box[0][1]+box[2][1])/2
+            if ((tempY > 5*binary.shape[0]/6) or (tempY < binary.shape[0]/6)) and (maxL < binary.shape[1]/2):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            if (minL == 0):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            if (maxL/minL > 5) and ((tempY > 4*binary.shape[0]/5) or (tempY < binary.shape[0]/5)):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue 
+            if (maxL < binary.shape[0]/2) and ((box[0][1]==0) or (box[0][1]==binary.shape[0]-1) or \
+                                               (box[2][1]==0) or (box[2][1]==binary.shape[0]-1)):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+        tt = binary.sum(axis=0)
+        zero = (tt != 0)
+        indices_zero = np.arange(len(tt))[zero]
+        if len(indices_zero) != 0:
+            binary = binary[:, indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+            image = image[:, indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        gray = 255 - gray
+        if gray.shape[1] < 7*18:
+            return np.array([])
+        y = gray.sum(axis=0)
+        x = np.arange(len(y))
+        if len(y) < 7*18:
+            return np.array([])
+        xList = self.findBreakPoint(gray, x, y)
+        if len(xList) < 17:
+            return np.array([])
+        xList = xList[np.lexsort(xList[:,::-1].T)] 
+        imageList = []
+        number1 = ''
+        number2 = ''
+        for i in range(1, len(xList)):
+            tempImage = gray[:, int(xList[i-1][0]): int(xList[i][0])]
+            _, binary1 = cv2.threshold(tempImage, 127, 255, cv2.THRESH_OTSU|cv2.THRESH_BINARY)
+            binary1 = self.standardizingImage(binary1)
+            imageList.append(binary1)
+        return imageList
+
+    def spiltImage2(self, image):
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_OTSU|cv2.THRESH_BINARY_INV)
+        if int(binary.shape[0]/10) > 0:
+            ele1 = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(binary.shape[0]/10)))
+            binary = cv2.dilate(binary, ele1, iterations=1)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            area = cv2.contourArea(contours[i])
+            if area < binary.shape[0]*binary.shape[1]/(20*20):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            cnt = contours[i]
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound1 = math.sqrt((box[0][0]-box[1][0])**2 + (box[0][1] - box[1][1])**2)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)
+            maxL = max(bound1, bound2)
+            minL = min(bound1, bound2)
+            tempY = (box[0][1]+box[2][1])/2
+            if ((tempY > 5*binary.shape[0]/6) or (tempY < binary.shape[0]/6)) and (maxL < binary.shape[1]/2):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            if (minL == 0):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            if (maxL/minL > 5) and ((tempY > 4*binary.shape[0]/5) or (tempY < binary.shape[0]/5)):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue 
+            if (maxL < binary.shape[0]/2) and ((box[0][1]==0) or (box[0][1]==binary.shape[0]-1) or \
+                                               (box[2][1]==0) or (box[2][1]==binary.shape[0]-1)):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+        tt = binary.sum(axis=0)
+        zero = (tt != 0)
+        indices_zero = np.arange(len(tt))[zero]
+        if len(indices_zero) != 0:
+            binary = binary[:, indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+            image = image[:, indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        gray = 255 - gray
+        if gray.shape[1] < 7*18:
+            return np.array([])
+        y = gray.sum(axis=0)
+        x = np.arange(len(y))
+        if len(y) < 7*18:
+            return np.array([])
+        xList = self.findBreakPoint(gray, x, y)
+        if len(xList) < 17:
+            return np.array([])
+        xList = xList[np.lexsort(xList[:,::-1].T)] 
+        imageList = []
+        number1 = ''
+        number2 = ''
+        for i in range(1, len(xList)):
+            tempImage = gray[:, int(xList[i-1][0]): int(xList[i][0])]
+            _, binary1 = cv2.threshold(tempImage, 127, 255, cv2.THRESH_OTSU|cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(binary1, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for i in range(len(contours)):
+                area = cv2.contourArea(contours[i])
+                if area < binary1.shape[0]*binary1.shape[1]/36:
+                    cv2.drawContours(binary1, [contours[i]], 0, 0, -1)
+            contours, _ = cv2.findContours(binary1, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if len(contours) < 1:
+                break
+            binary1 = self.standardizingImage(binary1)
+            imageList.append(binary1)
+        return imageList
+
+    def correctNumberImage(self, binary):
+        tt = binary.sum(axis=0)
+        zero = (tt != 0)
+        indices_zero = np.arange(len(tt))[zero]
+        if len(indices_zero) != 0:
+            binary = binary[:, indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+        tt = binary.sum(axis=1)
+        zero = (tt != 0)
+        indices_zero = np.arange(len(tt))[zero]
+        if len(indices_zero) != 0:
+            binary = binary[indices_zero[0]: indices_zero[len(indices_zero)-1]+1]
+        if binary.shape[0] < 15:
+            binary = cv2.resize(binary, (6, 10), interpolation=cv2.INTER_AREA)
+        else:
+            binary = cv2.resize(binary, (10, 18), interpolation=cv2.INTER_AREA)
+        _, binary = cv2.threshold(binary, 127, 255, cv2.THRESH_BINARY)
+        return binary
+
+    def standardizingImage(self, binary):
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            cnt = contours[i]
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound1 = math.sqrt((box[0][0]-box[1][0])**2 + (box[0][1] - box[1][1])**2)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)
+            maxL = max(bound1, bound2)
+            minL = min(bound1, bound2)
+            area = cv2.contourArea(cnt)
+            if area < binary.shape[0]*binary.shape[1]/225:
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            if (minL == 0):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            tempY = (box[0][1]+box[2][1])/2
+            if ((tempY > 5*binary.shape[0]/6) or (tempY < binary.shape[0]/6)):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+            if (maxL/minL > 5) and ((tempY > 4*binary.shape[0]/5) or (tempY < binary.shape[0]/5)):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue 
+            if (maxL < binary.shape[0]/2) and (((box[1][1]==0) and (box[2][1]==0)) or \
+                                           ((box[0][1]==binary.shape[1]-1) and (box[3][1]==binary.shape[1]-1))):
+                cv2.drawContours(binary, [contours[i]], 0, 0, -1)
+                continue
+        binary = self.correctNumberImage(binary)
+        binary = self.correctNumberImage(binary)
+        return binary
+
+    def getNumber(self, imageList):
+        number1 = ''
+        number2 = ''
+        for i in range(len(imageList)):
+            binary = imageList[i]
+            #model = joblib.load('newModel_10.m')
+            model = self.model1
+            size1 = 10
+            size2 = 6
+            if binary.shape[0] == 18:
+                #model = joblib.load('newModel_18.m')
+                model = self.model2
+                size1 = 18
+                size2 = 10
+            result = model.predict(binary.reshape(size1*size2).reshape(1, -1)/255)
+            number1 = number1 + str(result[0])
+            binary = np.rot90(binary, 1)
+            binary = np.rot90(binary, 1)
+            result = model.predict(binary.reshape(size1*size2).reshape(1, -1)/255)
+            number2 = str(result[0]) + number2
+        return number1, number2
+
+    def findDrivingIDArea(self, lock, image, off, isStop):
+        #image = correctContours(image, l_hsv, h_hsv)
+        h, w, _ = image.shape
+        dst = self.diffImage(image)
+        image = image[:, int(w/80): w-int(w/80)]
+        dst = dst[:, int(w/80): w-int(w/80)]
+        h, w, _ = image.shape
+        (_, dst) = cv2.threshold(dst, off, 255, cv2.THRESH_BINARY)
+        ele1 = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
+        if int(w/120) > 0:
+            ele1 = cv2.getStructuringElement(cv2.MORPH_RECT, (int(w/120), 1))
+        dst = cv2.dilate(dst, ele1, iterations=1)
+        dst = self.removeSmallLine(dst.copy(), w/9)
+        dst = np.rot90(dst, 1)
+        dst = self.removeSmallLine(dst.copy(), 5)
+        dst = np.rot90(dst, -1).copy()       
+        contours, _ = cv2.findContours(dst, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            cnt = contours[i]
+            area = cv2.contourArea(cnt)
+            if area < 100:
+                cv2.drawContours(dst, [cnt], 0, 0, -1)
+                continue
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound1 = math.sqrt((box[0][0]-box[1][0])**2 + (box[0][1] - box[1][1])**2)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)
+            if max(bound1, bound2) > 3*w/4:
+                cv2.drawContours(dst, [cnt], 0, 0, -1)
+                continue
+            if min(bound1, bound2) < 6:
+                cv2.drawContours(dst, [cnt], 0, 0, -1)
+                continue
+        region = self.getDrivingCardIDArea(dst)
+        for i in range(len(region)):
+            if isStop[0] == 1:
+                break
+            box = self.correctionBox(region[i])
+            sub = self.subImage(image, box)
+            subList = self.correctionImage(sub)
+            for i in range(len(subList)):
+                if (subList[i].shape[1] < 6*18) or (subList[i].shape[0] < 6):
+                    continue
+                imageList1 = self.spiltImage1(subList[i])
+                imageList2 = self.spiltImage2(subList[i])
+                if (len(imageList1) != 0):
+                    number1, number2 = self.getNumber(imageList1)
+                    self.recogniseAndcheck(lock, number1, number2, isStop)
+                if (len(imageList2) != 0):
+                    number3, number4 = self.getNumber(imageList2)
+                    self.recogniseAndcheck(lock, number3, number4, isStop)
+        return False
+
+    def recogniseAndcheck(self, lock, number1, number2, isStop):
+        #print(number1, number2)
+        flag = False
+        lock.acquire()
+        if isStop[0] == 1:
+            lock.release()
+            return True
+        if self.check_id_num(number1):
+            isStop[0] = 1
+            for i in range(len(number1)):
+                isStop[1 + i] = str(number1[i])
+            flag = True
+        if self.check_id_num(number2):
+            isStop[0] = 1
+            for i in range(len(number2)):
+                isStop[1 + i] = str(number2[i])
+            flag = True
+        lock.release()
+        return flag
+
+    def getDrivingCardMessage(self, lock, image, image_HSV, l_hsv, h_hsv, isStop):
+        mask = cv2.inRange(image_HSV, l_hsv, h_hsv)
+        mask = cv2.medianBlur(mask, 5)
+        mask = cv2.medianBlur(mask, 5)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for i in range(len(contours)):
+            cnt = contours[i]
+            area = cv2.contourArea(cnt)
+            if area < 100:
+                cv2.drawContours(mask, [cnt], 0, 0, -1)
+                continue
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            bound1 = math.sqrt((box[0][0]-box[1][0])**2 + (box[0][1] - box[1][1])**2)
+            bound2 = math.sqrt((box[0][0]-box[3][0])**2 + (box[0][1] - box[3][1])**2)
+            if min(bound1, bound2) < 100:
+                cv2.drawContours(mask, [cnt], 0, 0, -1)
+                continue
+        region = self.findDrivingCardArea(mask)
+        for i in range(len(region)):
+            sub = self.subImage(image, region[i])
+            (h, w, _) = sub.shape
+            scale = 0
+            if max(h, w)>1400:
+                scale = self.getScale(sub)
+                size = (int(w * scale), int(h * scale))  
+                sub = cv2.resize(sub, size, interpolation=cv2.INTER_AREA)
+            p0 = mp.Process(target=self.findDrivingIDArea, args=(lock, sub, 0.5, isStop))
+            p1 = mp.Process(target=self.findDrivingIDArea, args=(lock, sub, 1, isStop))
+            p2 = mp.Process(target=self.findDrivingIDArea, args=(lock, sub, 2, isStop))
+            p3 = mp.Process(target=self.findDrivingIDArea, args=(lock, sub, 3, isStop))
+            p4 = mp.Process(target=self.findDrivingIDArea, args=(lock, sub, 4, isStop))
+            p5 = mp.Process(target=self.findDrivingIDArea, args=(lock, sub, 5, isStop))
+            p0.start()
+            p1.start()
+            p2.start()
+            p3.start()
+            p4.start()
+            p5.start()
+            p0.join()
+            p1.join()
+            p2.join()
+            p3.join()
+            p4.join()
+            p5.join()
+        return True
+        
+    def Method(self, path):
+        image = self.addressGetImage(path)
+        image_HSV = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+        #1
+        l_hsv1 = np.array([15, 43, 0]) 
+        h_hsv1 = np.array([100, 250, 255])
+        #2
+        l_hsv2 = np.array([20, 29, 0]) 
+        h_hsv2 = np.array([100, 250, 255])
+        #3
+        l_hsv3 = np.array([23, 11, 0]) 
+        h_hsv3 = np.array([100, 250, 255])
+        #4
+        l_hsv4 = np.array([26, 43, 0]) 
+        h_hsv4 = np.array([67, 60, 255])
+        #5
+        l_hsv5 = np.array([8, 5, 0]) 
+        h_hsv5 = np.array([86, 67, 255])
+        #6
+        l_hsv6 = np.array([19, 3, 0]) 
+        h_hsv6 = np.array([100, 67, 255])
+        #7
+        l_hsv7 = np.array([35, 11, 0]) 
+        h_hsv7 = np.array([100, 67, 255])
+        #8
+        l_hsv8 = np.array([35, 65, 0]) 
+        h_hsv8 = np.array([95, 140, 255])
+        #9
+        l_hsv9 = np.array([30, 25, 0]) 
+        h_hsv9 = np.array([86, 67, 255])
+        #10
+        l_hsv10 = np.array([50, 11, 0]) 
+        h_hsv10 = np.array([110, 67, 255])
+        #11
+        l_hsv11 = np.array([26, 53, 0]) 
+        h_hsv11 = np.array([100, 150, 255])
+        #12
+        l_hsv12 = np.array([33, 3, 0]) 
+        h_hsv12 = np.array([130, 67, 255])
+        #13
+        l_hsv13 = np.array([37, 26, 70]) 
+        h_hsv13 = np.array([130, 140, 255])
+        #14
+        l_hsv14 = np.array([60, 23, 150]) 
+        h_hsv14 = np.array([100, 80, 255])
+        #15
+        l_hsv15 = np.array([22, 11, 150]) 
+        h_hsv15 = np.array([78, 80, 255])
+        #16
+        l_hsv16 = np.array([78, 53, 150]) 
+        h_hsv16 = np.array([130, 140, 255])
+        
+        manager = Manager()
+        isStop = manager.list(range(19))
+        isStop[0] = 0
+        
+        lock = Lock()
+        p1 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv1, h_hsv1, isStop))
+        p2 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv2, h_hsv2, isStop))
+        p3 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv3, h_hsv3, isStop))
+        p4 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv4, h_hsv4, isStop))
+        p5 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv5, h_hsv5, isStop))
+        p6 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv6, h_hsv6, isStop))
+        p7 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv7, h_hsv7, isStop))
+        p8 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv8, h_hsv8, isStop))
+        p9 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv9, h_hsv9, isStop))
+        p10 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv10, h_hsv10, isStop))
+        p11 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv11, h_hsv11, isStop))
+        p12 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv12, h_hsv12, isStop))
+        p13 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv13, h_hsv13, isStop))
+        p14 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv14, h_hsv14, isStop))
+        p15 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv15, h_hsv15, isStop))
+        p16 = mp.Process(target=self.getDrivingCardMessage, args=(lock, image, image_HSV, l_hsv16, h_hsv16, isStop))
+        p1.start()
+        p2.start()
+        p3.start()
+        p4.start()
+        p5.start()
+        p6.start()
+        p7.start()
+        p8.start()
+        p9.start()
+        p10.start()
+        p11.start()
+        p12.start()
+        p13.start()
+        p14.start()
+        p15.start()
+        p16.start()
+        p1.join()
+        p2.join()
+        p3.join()
+        p4.join()
+        p5.join()
+        p6.join()
+        p7.join()
+        p8.join()
+        p9.join()
+        p10.join()
+        p11.join()
+        p12.join()
+        p13.join()
+        p14.join()
+        p15.join()
+        p16.join()
+        return isStop
+
+    def getResult(self, path):
+        result = self.Method(path)
+        if result[0] == 1:
+            number = ""
+            for j in range(1, len(result)):
+                number = number + str(result[j])
+            return number
+        return '0'
