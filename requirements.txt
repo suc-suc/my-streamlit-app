@@ -1,17 +1,16 @@
---no-deps
 # ============================================================
 # Streamlit Cloud 部署(Cloud 无 Python 3.7,取 3.9 + TF 2.6 完全对齐训练环境)
-# TF 2.6.0 与新 streamlit 在 typing-extensions 上互斥(TF 锁 ~=3.7.4),
-# 无法自动解析,故全局 --no-deps,以下逐一手动锁定完整依赖闭包。
 # TF 2.6 要求 typing-extensions ~=3.7.4,streamlit 要求 >=4,官方源无法同时满足。
 # 解决:vendor/ 下两个本地兼容包(代码与官方一致,仅依赖声明/版本标签调整),
 #       无需 --no-deps,可在 Streamlit Cloud 标准 pip 流程下安装。
 # 数值一致性关键:tensorflow/keras/numpy/pandas/scikit-learn/scipy 版本
 # 与训练环境(ModelArts py3.7.10 清单)逐一对应。
 # ============================================================
+
 # --- 本地兼容包(仓库 vendor/ 目录)---
 ./vendor/streamlit-1.23.1-py2.py3-none-any.whl
 ./vendor/typing_extensions-3.7.4.9-py3-none-any.whl
+
 # --- 训练环境对齐(预测数值一致的关键)---
 tensorflow==2.6.0
 keras==2.6.0
@@ -24,6 +23,13 @@ numpy==1.19.5
 pandas==1.1.5
 scikit-learn==1.0.2
 scipy==1.7.3
+joblib==1.2.0
+threadpoolctl==3.1.0
+h5py==3.1.0
+gast==0.4.0
+google-pasta==0.2.0
+opt-einsum==3.3.0
+termcolor==1.1.0
 absl-py==0.15.0
 astunparse==1.6.3
 flatbuffers==1.12
@@ -31,11 +37,11 @@ six==1.15.0
 wrapt==1.12.1
 protobuf==3.20.3
 grpcio==1.49.1
+
 # --- 数据读取 ---
 openpyxl==3.1.2
 et-xmlfile==1.1.0
-# --- streamlit 1.23.1(支持 st.cache_data / st.divider)---
-streamlit==1.23.1
+
 # --- streamlit 1.23.1 及其前端依赖 ---
 altair==4.2.2
 entrypoints==0.4
@@ -49,6 +55,17 @@ blinker==1.6.2
 cachetools==5.3.0
 click==8.1.3
 gitpython==3.1.37
+gitdb==4.0.11
+smmap==5.0.1
+importlib-metadata==6.7.0
+zipp==3.15.0
+packaging==21.3
+pyparsing==3.0.9
+pillow==9.2.0
+pyarrow==6.0.1
+pympler==1.0.1
+python-dateutil==2.8.2
+pytz==2022.2.1
 requests==2.27.1
 charset-normalizer==2.0.12
 idna==3.4
@@ -61,10 +78,10 @@ pygments==2.13.0
 semver==2.13.0
 toml==0.10.2
 tornado==6.2
-typing-extensions==4.7.1
 tzlocal==4.2
 validators==0.20.0
 watchdog==2.0.0
+
 # --- pydeck 及其 ipywidgets 依赖链(streamlit 启动时即导入)---
 pydeck==0.8.0
 traitlets==5.9.0
@@ -73,3 +90,16 @@ comm==0.1.4
 widgetsnbextension==4.0.9
 jupyterlab-widgets==3.0.9
 ipython==8.12.3
+decorator==5.1.1
+backcall==0.2.0
+jedi==0.19.1
+parso==0.8.4
+matplotlib-inline==0.1.6
+pexpect==4.8.0
+ptyprocess==0.7.0
+prompt-toolkit==3.0.39
+wcwidth==0.2.8
+stack-data==0.6.3
+asttokens==2.4.1
+executing==2.0.1
+pure-eval==0.2.2
