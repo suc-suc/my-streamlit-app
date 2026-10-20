@@ -1,318 +1,229 @@
-import streamlit as st
+"""车型销量预测看板。
+
+预测逻辑完全委托给各车型目录下自己的 predict_*.py（每个模型的特征处理不同，
+以各脚本为准）。本文件只负责扫描月份、调用脚本的 predict_month(year, month)、
+把结果按月拼接展示。
+
+注意：目标环境需安装 TensorFlow（模型为 Keras 2 HDF5，需 TF <= 2.15）才能真实推理；
+本地无 TF 时可用占位 tensorflow 模块（predict 返回 [100, 110, ...]）走通界面。
+"""
+
+import ast
+import contextlib
+import hashlib
+import io
+import os
+import sys
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
+import streamlit as st
 
-# ====== Step 1: 模拟从第三方获取用户 embedding ======
-def get_mock_embedding(uid: str, dim: int = 128) -> list:
-    """
-    模拟调用第三方 embedding 服务。
-    实际使用时，可替换为读取预计算文件或调用内部 API。
-    """
-    np.random.seed(hash(uid) % (2**32))  # 固定种子，保证一致性
-    return np.random.rand(dim).round(4).tolist()
-
-
-# ====== Step 2: 原始用户数据 ======
-RAW_USERS = {
-    "U001": {"name": "张先生", "vin": "LSVAB2024XXXXXX", "model": "宏光 PLUS 2020款", "mileage": 86200, "last_maint": "2026-01-28", "location": "上海浦东", "notes": "客户备注: “这车是不是该换了？”", "maint_records": [{"date": "2026-01-28", "item": "更换底盘衬套", "cost": 1280}], "app_events": [{"time": "2026-02-01 10:23", "event": "打开「置换补贴」页面"}]},
-    "U002": {"name": "李女士", "vin": "LZWADAGA3XXXXXX", "model": "五菱宏光 MINIEV 2021款", "mileage": 42000, "last_maint": "2026-02-01", "location": "广州天河", "notes": "多次咨询续航问题", "maint_records": [{"date": "2026-02-01", "item": "电池健康检测", "cost": 0}], "app_events": [{"time": "2026-02-03 14:10", "event": "搜索「MINIEV 升级版」"}]},
-    "U003": {"name": "王先生", "vin": "LJDDAA225XXXXXX", "model": "星辰 2022款", "mileage": 68000, "last_maint": "2025-11-15", "location": "成都武侯", "notes": "保险到期未续", "maint_records": [{"date": "2025-11-15", "item": "常规保养", "cost": 320}], "app_events": []},
-    "U004": {"name": "赵先生", "vin": "LZWCAAGA7XXXXXX", "model": "缤果 2023款", "mileage": 28500, "last_maint": "2026-01-20", "location": "杭州西湖", "notes": "对智能座舱感兴趣", "maint_records": [{"date": "2026-01-20", "item": "OTA 升级支持", "cost": 0}], "app_events": [{"time": "2026-02-02 19:05", "event": "反复查看「缤果 Pro」配置"}]},
-    "U005": {"name": "刘女士", "vin": "LSVAB2025XXXXXX", "model": "宏光 S 2019款", "mileage": 102000, "last_maint": "2025-12-10", "location": "武汉江汉", "notes": "抱怨油耗高、空间小", "maint_records": [{"date": "2025-12-10", "item": "发动机积碳清洗", "cost": 480}], "app_events": []},
-    "U006": {"name": "陈先生", "vin": "LJDDAA228XXXXXX", "model": "星光 2024款 PHEV", "mileage": 15200, "last_maint": "2026-01-25", "location": "深圳南山", "notes": "关注充电便利性", "maint_records": [{"date": "2026-01-25", "item": "充电桩兼容性检测", "cost": 0}], "app_events": [{"time": "2026-02-03 08:45", "event": "定位附近超充站"}]},
-    "U007": {"name": "孙女士", "vin": "LSVAB2026XXXXXX", "model": "宏光 PLUS 2021款", "mileage": 78000, "last_maint": "2026-01-20", "location": "北京朝阳", "notes": "考虑换车但预算有限", "maint_records": [{"date": "2026-01-20", "item": "空调滤芯更换", "cost": 120}], "app_events": [{"time": "2026-01-30 14:00", "event": "查看老车主置换政策"}]},
-    "U008": {"name": "周先生", "vin": "LZWADAGA8XXXXXX", "model": "五菱荣光 2022款", "mileage": 50000, "last_maint": "2026-01-22", "location": "重庆渝中", "notes": "关注车辆保值率", "maint_records": [{"date": "2026-01-22", "item": "轮胎更换", "cost": 800}], "app_events": [{"time": "2026-02-03 10:20", "event": "查看二手车市场行情"}]},
-    "U009": {"name": "吴女士", "vin": "LSVAB2027XXXXXX", "model": "宏光 MINIEV 2020款", "mileage": 35000, "last_maint": "2026-01-25", "location": "南京鼓楼", "notes": "希望升级到更高配置", "maint_records": [{"date": "2026-01-25", "item": "电池检查", "cost": 0}], "app_events": [{"time": "2026-02-01 19:45", "event": "询问升级方案"}]},
-    "U010": {"name": "郑先生", "vin": "LJDDAA229XXXXXX", "model": "宏光 PLUS 2022款", "mileage": 55000, "last_maint": "2026-01-23", "location": "西安雁塔", "notes": "对车辆性能有要求", "maint_records": [{"date": "2026-01-23", "item": "制动系统检查", "cost": 300}], "app_events": [{"time": "2026-02-02 14:15", "event": "阅读技术文档"}]}
+# ============================ 车型配置 ============================
+# 每个车型 = 一个目录，目录下放它自己的 predict_*.py 脚本（含特征处理）与月度模型文件夹
+MODELS = {
+    "bingo": {"folder": "bingo", "script": "predict_bingo.py"},
+    "MINI": {"folder": "MINI", "script": "predict_mini.py"},
+    "星光": {"folder": "xingguang", "script": "predict_xingguang.py"},  # 目录名 xingguang
+    "微货": {"folder": "微货", "script": "predict_weihuo.py"},
 }
 
-# 注入 embedding
-USERS = {}
-for uid, data in RAW_USERS.items():
-    USERS[uid] = {**data, "embd": get_mock_embedding(uid, dim=128)}
+st.set_page_config(page_title="车型销量预测看板", layout="wide")
+st.title("车型销量预测看板")
 
 
-# ====== 初始化状态 ======
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = "user_list"
-if 'selected_user_id' not in st.session_state:
-    st.session_state.selected_user_id = None
-if 'page_num' not in st.session_state:
-    st.session_state.page_num = 1
-if 'call_result' not in st.session_state:
-    st.session_state.call_result = {}
+# ============================ 工具 ============================
+@st.cache_data(show_spinner=False)
+def scan_months(data_dir_str: str, model_key: str) -> list[tuple[int, int]]:
+    """扫描某车型下形如 YYYY_MM 的月度文件夹（要求该月文件夹里有 keras 模型文件）。"""
+    cfg = MODELS[model_key]
+    root = Path(data_dir_str) / cfg["folder"]
+    script = root / cfg["script"]
+    if not (root.is_dir() and script.is_file()):
+        return []
+    months = []
+    for sub in sorted(root.iterdir()):
+        if sub.is_dir() and len(sub.name) == 7 and sub.name[4] == "_":
+            try:
+                year, month = int(sub.name[:4]), int(sub.name[5:])
+            except ValueError:
+                continue
+            if any(sub.glob("*.keras")):
+                months.append((year, month))
+    return months
 
 
-# ====== 侧边栏 ======
-with st.sidebar:
-    st.title("🧭 导航")
-    if st.button("🏠 用户管理中心"):
-        st.session_state.current_page = "user_list"
-        st.session_state.selected_user_id = None
+def load_predict_namespace(script_path: Path):
+    """加载某车型自己的预测脚本，返回其命名空间。
 
-    if st.session_state.selected_user_id and st.button("👤 客户详情"):
-        st.session_state.current_page = "user_detail"
-
-    if st.session_state.current_page == "ai_result":
-        st.button("🔍 AI分析结果", disabled=True)
-    if st.session_state.current_page == "touch_page":
-        st.button("📞 触达分发", disabled=True)
-
-    st.divider()
-    if st.button("🔄 重置所有状态", type="secondary"):
-        st.session_state.call_result = {}
-        st.session_state.selected_user_id = None
-        st.session_state.current_page = "user_list"
-        st.session_state.page_num = 1
-        st.rerun()
-
-
-# ====== 主标题 ======
-st.title("🚗 高潜客户识别系统 Demo")
-st.caption("*模拟界面 · 数据脱敏 · 已集成用户 Embedding*")
-
-
-# ========== 用户列表页 ==========
-if st.session_state.current_page == "user_list":
-    st.subheader(f"👥 基盘客户池（共 {len(USERS)} 位）")
-    
-    page_size = 5
-    total_pages = (len(USERS) + page_size - 1) // page_size
-    start_idx = (st.session_state.page_num - 1) * page_size
-    end_idx = start_idx + page_size
-    user_subset = list(USERS.items())[start_idx:end_idx]
-    
-    for idx, (uid, user) in enumerate(user_subset):
-        col1, col2, col3, col4 = st.columns([1.5, 1.5, 1, 1])
-        with col1:
-            st.write(f"**{user['name']}**")
-        with col2:
-            st.write(user["model"])
-        with col3:
-            st.write(f"{user['mileage']:,} km")
-        with col4:
-            status = st.session_state.call_result.get(uid, "待触达")
-            color = "green" if status == "interested" else ("red" if status == "declined" else "gray")
-            st.markdown(f"<span style='color:{color}; font-weight:bold;'>{status}</span>", unsafe_allow_html=True)
-        
-        btn_key = f"userlist_p{st.session_state.page_num}_i{idx}_u{uid}"
-        if st.button(f"👤 查看 {user['name']} 详情", key=btn_key):
-            st.session_state.selected_user_id = uid
-            st.session_state.current_page = "user_detail"
-            st.rerun()
-        
-        st.divider()
-
-    col_prev, col_center, col_next = st.columns([1, 2, 1])
-    with col_prev:
-        if st.session_state.page_num > 1:
-            if st.button("⬅️ 上一页", key="btn_prev"):
-                st.session_state.page_num -= 1
-                st.rerun()
-    with col_center:
-        st.markdown(
-            f"<div style='text-align: center; margin-top: 8px;'>第 {st.session_state.page_num} 页 / 共 {total_pages} 页</div>",
-            unsafe_allow_html=True
-        )
-    with col_next:
-        if st.session_state.page_num < total_pages:
-            if st.button("➡️ 下一页", key="btn_next"):
-                st.session_state.page_num += 1
-                st.rerun()
-
-# ========== 客户详情页 ==========
-elif st.session_state.current_page == "user_detail":
-    user = USERS[st.session_state.selected_user_id]
-    st.subheader(f"👤 {user['name']} 的客户档案")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown(f"""
-        **基本信息**  
-        - VIN: `{user['vin']}`  
-        - 车型: {user['model']}  
-        - 当前里程: {user['mileage']:,} km  
-        - 所在地: {user['location']}  
-        - 最后进店: {user['last_maint']}
-        """)
-    with c2:
-        st.markdown(f"**最新反馈**\n> {user['notes']}")
-
-    st.subheader("🔧 近期维修记录")
-    for rec in user["maint_records"]:
-        st.text(f"{rec['date']} | {rec['item']} | ¥{rec['cost']}")
-
-    st.subheader("📱 APP 行为埋点记录")
-    if user["app_events"]:
-        for evt in user["app_events"]:
-            st.text(f"{evt['time']} | {evt['event']}")
-    else:
-        st.info("该用户暂无 APP 行为记录")
-
-    with st.expander("🔍 用户 Embedding (128维，前10维)"):
-        st.code(str(user['embd'][:10]))
-
-    st.divider()
-    if st.button("🔍 AI 智能分析（评估换购倾向）"):
-        st.session_state.current_page = "ai_result"
-        st.rerun()
-    if st.button("← 返回客户列表"):
-        st.session_state.current_page = "user_list"
-        st.rerun()
-
-# ========== AI 分析结果页（支持低潜用户手动触达）==========
-elif st.session_state.current_page == "ai_result":
-    user = USERS[st.session_state.selected_user_id]
-    
-    # 评分映射（U003 明确为低潜）
-    score_map = {
-        "U001": 82, "U002": 76, "U004": 70, "U006": 68,
-        "U007": 65, "U009": 55, "U010": 72,
-        "U003": 45,   # 低潜
-        "U005": 58,   # 中潜
-        "U008": 60    # 中潜
-    }
-    score = score_map.get(st.session_state.selected_user_id, 50)
-    
-    # 分层判断
-    if score >= 70:
-        status_label = "高潜"
-        status_color = "#2E8B57"  # 深绿
-        recommendation = "强烈推荐触达"
-    elif score >= 50:
-        status_label = "中潜"
-        status_color = "#FF8C00"  # 橙色
-        recommendation = "可谨慎触达"
-    else:
-        status_label = "低潜"
-        status_color = "#DC143C"  # 深红
-        recommendation = "不建议触达（需人工确认）"
-
-    # 显示评分与标签
-    st.markdown(
-        f"<h3>⭐ AI 评估得分：<span style='color:{status_color}; font-weight:bold;'>{score} / 100</span> → "
-        f"<span style='color:{status_color}; font-weight:bold;'>{status_label}客户</span></h3>",
-        unsafe_allow_html=True
+    每个模型文件夹下的 predict_*.py 末尾都有演示代码（直接调用 predict_month），
+    import 时会真的跑预测。这里用 AST 把这些尾部演示语句剥掉，只保留函数定义，
+    从而安全地拿到脚本里的 read_file_model / predict_month / 特征处理逻辑。
+    """
+    src = script_path.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(script_path))
+    last_def_end = max(
+        node.end_lineno for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
     )
-    st.caption(f"💡 AI 建议：{recommendation}")
+    keep = [node for node in tree.body if getattr(node, "lineno", 0) <= last_def_end]
+    new_tree = ast.Module(body=keep, type_ignores=[])
+    ast.fix_missing_locations(new_tree)
+    namespace = {"__name__": script_path.stem}
+    exec(compile(new_tree, str(script_path), "exec"), namespace)  # noqa: S102
+    return namespace, hashlib.md5(src.encode("utf-8")).hexdigest()
 
-    st.subheader("主导原因")
-    reasons = {
-        "U001": "- 车龄老化 + 明确换车意向\n- APP 浏览置换页面",
-        "U002": "- 新能源车主关注升级\n- 多次查看新车型",
-        "U004": "- 年轻用户偏好智能配置\n- 反复查看高配版",
-        "U006": "- PHEV 用户关注生态\n- 主动查找充电设施",
-        "U007": "- 预算有限但仍考虑换车\n- 关注优惠活动",
-        "U009": "- 希望升级到更高配置\n- 询问升级方案",
-        "U010": "- 对车辆性能有要求\n- 阅读技术文档",
-        "U003": "- 无 APP 行为\n- 保险断档超2个月\n- 近6个月无换购相关信号",
-        "U005": "- 车龄老（5年+）、里程高（10万+）\n- 抱怨产品力但无主动升级行为",
-        "U008": "- 关注保值率\n- 查看二手车行情（可能卖车而非换本品牌）"
-    }
-    st.markdown(reasons.get(st.session_state.selected_user_id, "- 综合用车行为分析"))
 
-    st.subheader("🎯 推荐策略")
-    if status_label == "高潜":
-        st.markdown("""
-        - 发放老车主置换补贴 5,000 元  
-        - 安排就近门店新能源试驾  
-        - 赠送延保5折券
-        """)
-    elif status_label == "中潜":
-        st.markdown("""
-        - 推送专属车型对比报告  
-        - 邀请参加线下品鉴会
-        """)
-    else:  # 低潜
-        st.warning("⚠️ AI 判断该用户当前无明显换购意向，**默认不建议主动电话触达**。")
-        st.markdown("""
-        - 如您有额外信息（如线下接触、熟人推荐），可**手动发起触达**
-        - 系统将记录此次操作，用于后续模型优化
-        """)
+def read_fill_config(root: Path, year: int, month: int) -> pd.Series:
+    fc = pd.read_excel(root / "fill_config.xlsx", engine="openpyxl")
+    mask = (fc["年份"] == year) & (fc["月份"] == month)
+    return fc[mask].iloc[0]
 
-    # === 关键修改：所有用户都显示按钮，但低潜加二次确认 ===
-    if status_label == "低潜":
-        with st.expander("❗ 手动触发触达（低潜用户）", expanded=False):
-            st.warning("您即将对一位低潜客户发起电话沟通，此操作将覆盖AI建议。")
-            if st.button("📞 强制生成触达任务（人工覆盖）", type="primary"):
-                st.session_state.current_page = "touch_page"
-                st.rerun()
-    else:
-        if st.button("📞 生成触达任务（电话沟通）"):
-            st.session_state.current_page = "touch_page"
-            st.rerun()
-    
-    if st.button("← 返回客户详情"):
-        st.session_state.current_page = "user_detail"
-        st.rerun()
 
-# ========== 触达分发页 ==========
-elif st.session_state.current_page == "touch_page":
-    user = USERS[st.session_state.selected_user_id]
-    uid = st.session_state.selected_user_id
+@st.cache_data(show_spinner=False)
+def month_meta(data_dir_str: str, model_key: str, year: int, month: int, script_md5: str) -> tuple:
+    """读取某月的日期与真实销量（用于折线参考），返回 (日期列表, 真实值列表, 行区间)。"""
+    cfg = MODELS[model_key]
+    root = Path(data_dir_str) / cfg["folder"]
+    row = read_fill_config(root, year, month)
+    start_row, end_row = int(row.iloc[4]), int(row.iloc[5])
+    month_dir = root / f"{year}_{month:02d}"
 
-    if uid not in st.session_state.call_result:
-        st.subheader("📞 模拟电话沟通结果")
-        st.info(f"正在呼叫 {user['name']}（{user['location']}）...")
-        st.write("请选择客户反馈：")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("✅ 客户有兴趣，继续推进", key="btn_interested"):
-                st.session_state.call_result[uid] = "interested"
-                st.rerun()
-        with col2:
-            if st.button("❌ 客户明确表示：暂不换车", key="btn_declined"):
-                st.session_state.call_result[uid] = "declined"
-                st.rerun()
-    else:
-        result = st.session_state.call_result[uid]
-        if result == "declined":
-            st.error("❌ 客户在电话中明确表示：**暂不考虑换车**")
-            st.warning("系统已记录该状态，**不会下发门店任务**，避免重复打扰。")
-            if st.button("← 返回AI分析"):
-                st.session_state.current_page = "ai_result"
-                st.rerun()
-        else:
-            detailed_location = {
-                "上海浦东": "上海浦东金桥",
-                "广州天河": "广州天河体育中心",
-                "杭州西湖": "杭州西湖文三路",
-                "深圳南山": "深圳南山科技园",
-                "北京朝阳": "北京朝阳望京",
-                "南京鼓楼": "南京鼓楼新街口",
-                "西安雁塔": "西安雁塔大雁塔",
-                "成都武侯": "成都武侯祠附近",
-                "武汉江汉": "武汉江汉路步行街",
-                "重庆渝中": "重庆渝中解放碑"
-            }.get(user["location"], user["location"])
+    def _data_xlsx(directory: Path):
+        for candidate in sorted(directory.glob("*.xlsx")):
+            if candidate.name != "fill_config.xlsx" and "zhengce" not in candidate.name:
+                return candidate
+        return None
 
-            st.subheader("【动态画像更新】")
-            st.info(f"📞 通话摘要：\n“住在{detailed_location}…近期考虑换车，希望了解新能源选项”")
-            st.markdown(f"""
-            ✅ 自动更新字段：
-            - 居住地 → {detailed_location}
-            - 购车意向 → 高（预计30天内）
-            - 车型偏好 → 新能源 MPV / SUV
-            """)
+    # 优先用月度文件夹里的 xlsx（最新数据），退回车型根目录的
+    xlsx = _data_xlsx(month_dir) or _data_xlsx(root)
+    if not xlsx.is_file():
+        return [], None, (start_row, end_row)
+    df = pd.read_excel(xlsx, engine="openpyxl").iloc[start_row:end_row]
+    dates = pd.to_datetime(df["月份"]).dt.strftime("%m-%d").tolist()
+    target_col = "invoicing_count" if model_key == "bingo" else "销量"
+    actual = df[target_col].tolist() if target_col in df.columns else None
+    return dates, actual, (start_row, end_row)
 
-            st.subheader("📍 就近门店智能分发")
-            location_map = {
-                "上海浦东": (31.23, 121.5),
-                "广州天河": (23.13, 113.33),
-                "成都武侯": (30.60, 104.06),
-                "杭州西湖": (30.25, 120.15),
-                "武汉江汉": (30.58, 114.27),
-                "深圳南山": (22.52, 113.93),
-                "北京朝阳": (39.93, 116.46),
-                "重庆渝中": (29.56, 106.55),
-                "南京鼓楼": (32.06, 118.78),
-                "西安雁塔": (34.21, 108.94)
-            }
-            lat, lon = location_map[user["location"]]
-            st.map(data=[{"lat": lat, "lon": lon}], zoom=10)
-            st.markdown(f"**推荐门店**：五菱{user['location'][:2]}店（约1.5km内）\n\n**负责人**：金牌顾问")
 
-            st.success("✅ 任务已推送至飞书，24小时内跟进")
+@st.cache_data(show_spinner=False)
+def predict_month(
+    data_dir_str: str, model_key: str, year: int, month: int, script_md5: str
+) -> list[float]:
+    """调用某车型自己的 predict_*.py 的 predict_month(year, month)，返回每日预测值。
 
-            if st.button("← 返回AI分析"):
-                st.session_state.current_page = "ai_result"
-                st.rerun()
+    script_md5 只作缓存键（脚本内容变了缓存自动失效）。
+    """
+    cfg = MODELS[model_key]
+    root = Path(data_dir_str) / cfg["folder"]
+    script_path = root / cfg["script"]
+    namespace, _ = load_predict_namespace(script_path)
+
+    cwd = os.getcwd()
+    os.chdir(root)  # 脚本内部用相对路径读 ./fill_config.xlsx、./YYYY_MM/...
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            preds = namespace["predict_month"](year, month)
+    finally:
+        os.chdir(cwd)
+    arr = np.asarray(preds, dtype=float).reshape(-1)
+    return arr.tolist()
+
+
+# ============================ 侧边栏 ============================
+st.sidebar.header("数据与筛选")
+# 部署到 Streamlit Cloud 时把 4 个车型文件夹放到仓库的 data/ 下；
+# 本地开发仍用 D 盘路径（也可用环境变量 DATA_DIR 指定）
+if os.environ.get("DATA_DIR"):
+    default_data_dir = os.environ["DATA_DIR"]
+elif Path("./data").exists():
+    default_data_dir = "./data"
+else:
+    default_data_dir = r"D:\app\新建文件夹 (4)\新建文件夹 (6)"
+data_dir_str = st.sidebar.text_input("数据根目录", value=default_data_dir)
+
+model_key = st.sidebar.selectbox("选择车型", options=list(MODELS.keys()))
+avail_months = scan_months(data_dir_str, model_key)
+years = sorted({y for y, _ in avail_months})
+if not years:
+    st.error(
+        f"在 {data_dir_str}\\{MODELS[model_key]['folder']} 下没有找到月度模型文件夹，"
+        "请检查数据根目录是否正确。"
+    )
+    st.stop()
+year = st.sidebar.selectbox("选择年份", options=years)
+month = st.sidebar.selectbox(
+    "选择月份", options=sorted(m for y, m in avail_months if y == year), format_func=lambda m: f"{m}月"
+)
+
+
+# ============================ 主区域 ============================
+if not avail_months:
+    st.stop()
+
+script_path = Path(data_dir_str) / MODELS[model_key]["folder"] / MODELS[model_key]["script"]
+if not script_path.is_file():
+    st.error(f"未找到预测脚本 {script_path}，无法预测。")
+    st.stop()
+
+# 预测 + 元数据（预测脚本里已含真实环境的特征处理）
+preds = predict_month(data_dir_str, model_key, year, month, script_path.stat().st_mtime_ns)
+dates, actual, (start_row, end_row) = month_meta(
+    data_dir_str, model_key, year, month, script_path.stat().st_mtime_ns
+)
+
+if not dates or len(preds) != len(dates):
+    st.error(f"预测长度({len(preds)})与日期数({len(dates)})不一致，月份行区间 {start_row}:{end_row}。")
+    st.stop()
+
+df_day = pd.DataFrame({"日期": dates, "预测销量": np.round(preds, 1)})
+if actual is not None:
+    df_day["真实销量"] = actual
+
+total = float(np.sum(preds))
+avg = float(np.mean(preds))
+c1, c2, c3 = st.columns(3)
+c1.metric("预测总量", f"{total:,.0f}")
+c2.metric("日均预测", f"{avg:,.1f}")
+c3.metric("天数", len(preds))
+
+import altair as alt
+
+chart = (
+    alt.Chart(df_day)
+    .mark_bar()
+    .encode(x=alt.X("日期:N", sort=None, title=f"{year}年{month}月"), y="预测销量:Q", tooltip=list(df_day.columns))
+    .properties(height=400, title=f"{model_key} {year}-{month:02d} 日度预测销量")
+)
+if actual is not None:
+    line = (
+        alt.Chart(df_day)
+        .mark_line(color="red", point=True)
+        .encode(x=alt.X("日期:N", sort=None), y="真实销量:Q")
+    )
+    chart = chart + line
+st.altair_chart(chart, use_container_width=True)
+
+with st.expander("查看日度明细"):
+    st.dataframe(df_day, use_container_width=True)
+
+# ============================ 全年各月对比 ============================
+st.divider()
+st.subheader(f"{year}年 各月预测总量对比")
+month_options = sorted(m for y, m in avail_months if y == year)
+totals = []
+with st.spinner("正在逐月预测..."):
+    for m in month_options:
+        pm = predict_month(data_dir_str, model_key, year, m, script_path.stat().st_mtime_ns)
+        totals.append({"月份": f"{m}月", "预测总量": round(float(np.sum(pm)), 1)})
+df_month = pd.DataFrame(totals)
+bar = (
+    alt.Chart(df_month)
+    .mark_bar()
+    .encode(x=alt.X("月份:N", sort=None), y="预测总量:Q", tooltip=["月份", "预测总量"])
+    .properties(height=350)
+)
+st.altair_chart(bar, use_container_width=True)
+with st.expander("查看月度汇总"):
+    st.dataframe(df_month, use_container_width=True)
