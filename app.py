@@ -8,6 +8,8 @@
 本地无 TF 时可用占位 tensorflow 模块（predict 返回 [100, 110, ...]）走通界面。
 """
 
+from __future__ import annotations
+
 import ast
 import contextlib
 import hashlib
@@ -63,10 +65,11 @@ def load_predict_namespace(script_path: Path):
     """
     src = script_path.read_text(encoding="utf-8")
     tree = ast.parse(src, filename=str(script_path))
-    last_def_end = max(
-        node.end_lineno for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+    # Python 3.7 的 AST 节点没有 end_lineno，按最后一个函数/类在 body 中的位置截断
+    last_def_index = max(
+        i for i, node in enumerate(tree.body) if isinstance(node, (ast.FunctionDef, ast.ClassDef))
     )
-    keep = [node for node in tree.body if getattr(node, "lineno", 0) <= last_def_end]
+    keep = tree.body[: last_def_index + 1]
     new_tree = ast.Module(body=keep, type_ignores=[])
     ast.fix_missing_locations(new_tree)
     namespace = {"__name__": script_path.stem}
@@ -107,6 +110,34 @@ def month_meta(data_dir_str: str, model_key: str, year: int, month: int, script_
 
 
 @st.cache_data(show_spinner=False)
+def actual_month_total(data_dir_str: str, model_key: str, year: int, month: int) -> float | None:
+    """当月真实销量总和（没有真实数据时返回 None）。"""
+    cfg = MODELS[model_key]
+    root = Path(data_dir_str) / cfg["folder"]
+    try:
+        row = read_fill_config(root, year, month)
+    except Exception:
+        return None
+    start_row, end_row = int(row.iloc[4]), int(row.iloc[5])
+    month_dir = root / f"{year}_{month:02d}"
+
+    def _data_xlsx(directory: Path):
+        for candidate in sorted(directory.glob("*.xlsx")):
+            if candidate.name != "fill_config.xlsx" and "zhengce" not in candidate.name:
+                return candidate
+        return None
+
+    xlsx = _data_xlsx(month_dir) or _data_xlsx(root)
+    if xlsx is None or not xlsx.is_file():
+        return None
+    df = pd.read_excel(xlsx, engine="openpyxl").iloc[start_row:end_row]
+    target_col = "invoicing_count" if model_key == "bingo" else "销量"
+    if target_col not in df.columns:
+        return None
+    return float(pd.to_numeric(df[target_col], errors="coerce").sum())
+
+
+@st.cache_data(show_spinner=False)
 def predict_month(
     data_dir_str: str, model_key: str, year: int, month: int, script_md5: str
 ) -> list[float]:
@@ -141,7 +172,8 @@ elif Path("./data").exists():
     default_data_dir = "./data"
 else:
     default_data_dir = r"D:\app\新建文件夹 (4)\新建文件夹 (6)"
-data_dir_str = st.sidebar.text_input("数据根目录", value=default_data_dir)
+with st.sidebar.expander("数据根目录（一般不用改）"):
+    data_dir_str = st.text_input("数据根目录", value=default_data_dir)
 
 model_key = st.sidebar.selectbox("选择车型", options=list(MODELS.keys()))
 avail_months = scan_months(data_dir_str, model_key)
@@ -183,47 +215,73 @@ if actual is not None:
 
 total = float(np.sum(preds))
 avg = float(np.mean(preds))
-c1, c2, c3 = st.columns(3)
-c1.metric("预测总量", f"{total:,.0f}")
-c2.metric("日均预测", f"{avg:,.1f}")
-c3.metric("天数", len(preds))
+has_actual = actual is not None
+actual_total = float(np.nansum(np.asarray(actual, dtype=float))) if has_actual else None
+
+st.subheader(f"{model_key} · {year} 年 {month} 月")
+m1, m2, m3, m4 = st.columns(4)
+if has_actual:
+    diff = total - actual_total
+    diff_pct = diff / actual_total * 100 if actual_total else float("nan")
+    m1.metric("预测总量", f"{total:,.0f}", delta=f"偏差 {diff:+,.0f}（{diff_pct:+.1f}%）")
+    m2.metric("实际总量", f"{actual_total:,.0f}")
+else:
+    m1.metric("预测总量", f"{total:,.0f}")
+    m2.metric("实际总量", "—")
+m3.metric("日均预测", f"{avg:,.1f}")
+m4.metric("天数", f"{len(preds)} 天")
 
 import altair as alt
 
-chart = (
-    alt.Chart(df_day)
-    .mark_bar()
-    .encode(x=alt.X("日期:N", sort=None, title=f"{year}年{month}月"), y="预测销量:Q", tooltip=list(df_day.columns))
-    .properties(height=400, title=f"{model_key} {year}-{month:02d} 日度预测销量")
+base = alt.Chart(df_day).encode(x=alt.X("日期:N", sort=None, title=None))
+bar = base.mark_bar(color="#2E6BE6", size=max(6, 340 // max(len(df_day), 1))).encode(
+    y=alt.Y("预测销量:Q", title="日销量"), tooltip=list(df_day.columns)
 )
-if actual is not None:
-    line = (
-        alt.Chart(df_day)
-        .mark_line(color="red", point=True)
-        .encode(x=alt.X("日期:N", sort=None), y="真实销量:Q")
+charts = bar
+if has_actual:
+    line = base.mark_line(color="#E4572E", point=True, strokeWidth=2).encode(
+        y=alt.Y("真实销量:Q", title="日销量")
     )
-    chart = chart + line
-st.altair_chart(chart, use_container_width=True)
+    charts = charts + line
+st.altair_chart(charts.properties(height=430), use_container_width=True)
 
 with st.expander("查看日度明细"):
     st.dataframe(df_day, use_container_width=True)
 
 # ============================ 全年各月对比 ============================
 st.divider()
-st.subheader(f"{year}年 各月预测总量对比")
+st.subheader(f"{year} 年各月总量：预测 vs 实际")
 month_options = sorted(m for y, m in avail_months if y == year)
-totals = []
+rows = []
 with st.spinner("正在逐月预测..."):
     for m in month_options:
         pm = predict_month(data_dir_str, model_key, year, m, script_path.stat().st_mtime_ns)
-        totals.append({"月份": f"{m}月", "预测总量": round(float(np.sum(pm)), 1)})
-df_month = pd.DataFrame(totals)
-bar = (
-    alt.Chart(df_month)
-    .mark_bar()
-    .encode(x=alt.X("月份:N", sort=None), y="预测总量:Q", tooltip=["月份", "预测总量"])
-    .properties(height=350)
+        rows.append({"月份": f"{m}月", "类别": "预测", "总量": round(float(np.sum(pm)), 1)})
+        at = actual_month_total(data_dir_str, model_key, year, m)
+        if at is not None:
+            rows.append({"月份": f"{m}月", "类别": "实际", "总量": round(at, 1)})
+df_long = pd.DataFrame(rows)
+color_scale = alt.Scale(domain=["预测", "实际"], range=["#2E6BE6", "#E4572E"])
+common_encode = dict(
+    x=alt.X("月份:N", sort=None, title=None),
+    y=alt.Y("总量:Q", title="月总量"),
+    color=alt.Color("类别:N", scale=color_scale, legend=None),
+    tooltip=["月份", "类别", "总量"],
 )
-st.altair_chart(bar, use_container_width=True)
-with st.expander("查看月度汇总"):
-    st.dataframe(df_month, use_container_width=True)
+if hasattr(alt, "XOffset"):
+    # altair 5+：真正的分组柱状图
+    month_chart = alt.Chart(df_long).mark_bar().encode(**common_encode, xOffset="类别:N")
+else:
+    # altair 4.2（线上环境）：用列分面实现并排柱状图
+    month_chart = (
+        alt.Chart(df_long)
+        .mark_bar()
+        .encode(
+            **common_encode,
+            column=alt.Column(
+                "类别:N", header=alt.Header(title=None, labelOrient="bottom"), spacing=12
+            ),
+        )
+        .properties(width=alt.Step(34))
+    )
+st.altair_chart(month_chart.properties(height=350), use_container_width=True)
