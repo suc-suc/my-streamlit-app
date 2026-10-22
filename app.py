@@ -261,27 +261,22 @@ with st.spinner("正在逐月预测..."):
         if at is not None:
             rows.append({"月份": f"{m}月", "类别": "实际", "总量": round(at, 1)})
 df_long = pd.DataFrame(rows)
+# altair 4（线上环境）没有 xOffset 分组柱状图，把“月份·类别”合成一个类目轴，实现真正的蓝橙并列
+df_long["标签"] = df_long["月份"] + "·" + df_long["类别"]
+label_order = [lb for lb in (f"{m}月·{c}" for m in month_options for c in ("预测", "实际")) if lb in set(df_long["标签"])]
 color_scale = alt.Scale(domain=["预测", "实际"], range=["#2E6BE6", "#E4572E"])
-common_encode = dict(
-    x=alt.X("月份:N", sort=None, title=None),
-    y=alt.Y("总量:Q", title="月总量"),
-    color=alt.Color("类别:N", scale=color_scale, legend=None),
-    tooltip=["月份", "类别", "总量"],
-)
-if hasattr(alt, "XOffset"):
-    # altair 5+：真正的分组柱状图
-    month_chart = alt.Chart(df_long).mark_bar().encode(**common_encode, xOffset="类别:N")
-else:
-    # altair 4.2（线上环境）：用列分面实现并排柱状图
-    month_chart = (
-        alt.Chart(df_long)
-        .mark_bar()
-        .encode(
-            **common_encode,
-            column=alt.Column(
-                "类别:N", header=alt.Header(title=None, labelOrient="bottom"), spacing=12
-            ),
-        )
-        .properties(width=alt.Step(34))
+month_chart = (
+    alt.Chart(df_long)
+    .mark_bar(size=30)
+    .encode(
+        x=alt.X(
+            "标签:N", sort=label_order, title=None,
+            axis=alt.Axis(labelAngle=45, labelFontSize=11),
+        ),
+        y=alt.Y("总量:Q", title="月总量"),
+        color=alt.Color("类别:N", scale=color_scale, legend=None),
+        tooltip=["月份", "类别", "总量"],
     )
-st.altair_chart(month_chart.properties(height=350), use_container_width=True)
+    .properties(height=350)
+)
+st.altair_chart(month_chart, use_container_width=True)
