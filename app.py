@@ -210,6 +210,9 @@ if not dates or len(preds) != len(dates):
     st.stop()
 
 df_day = pd.DataFrame({"日期": dates, "预测销量": np.round(preds, 1)})
+_full_dates = pd.to_datetime([f"{year}-{d}" for d in dates], format="%Y-%m-%d")
+_weeks = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+df_day.insert(1, "星期", [_weeks[w] for w in _full_dates.weekday])
 if actual is not None:
     df_day["真实销量"] = actual
 
@@ -234,19 +237,34 @@ m4.metric("天数", f"{len(preds)} 天")
 import altair as alt
 
 base = alt.Chart(df_day).encode(x=alt.X("日期:N", sort=None, title=None))
+hover = alt.selection_single(on="mouseover", empty="none", clear="mouseout")
 bar = base.mark_bar(color="#2E6BE6", size=max(6, 340 // max(len(df_day), 1))).encode(
-    y=alt.Y("预测销量:Q", title="日销量"), tooltip=list(df_day.columns)
-)
+    y=alt.Y("预测销量:Q", title="日销量"),
+    tooltip=list(df_day.columns),
+    opacity=alt.condition(hover, alt.value(1.0), alt.value(0.75)),
+).add_selection(hover)
 charts = bar
 if has_actual:
     line = base.mark_line(color="#E4572E", point=True, strokeWidth=2).encode(
         y=alt.Y("真实销量:Q", title="日销量")
     )
     charts = charts + line
-st.altair_chart(charts.properties(height=430), use_container_width=True)
+st.altair_chart(
+    charts.properties(height=430)
+    .configure_axis(labelFontSize=12, titleFontSize=13)
+    .configure_axisY(gridColor="#EDF0F5")
+    .configure_view(strokeOpacity=0),
+    use_container_width=True,
+)
 
 with st.expander("查看日度明细"):
-    st.dataframe(df_day, use_container_width=True)
+    # 周末行整体标蓝灰，与工作区分开
+    _is_weekend = [w in ("周六", "周日") for w in df_day["星期"]]
+
+    def _hl(row):
+        return ["background-color: #EDF2FB" if _is_weekend[row.name] else ""] * len(row)
+
+    st.dataframe(df_day.style.apply(_hl, axis=1), use_container_width=True)
 
 # ============================ 全年各月对比 ============================
 st.divider()
@@ -278,5 +296,8 @@ month_chart = (
         tooltip=["月份", "类别", "总量"],
     )
     .properties(height=350)
+    .configure_axis(labelFontSize=12, titleFontSize=13)
+    .configure_axisY(gridColor="#EDF0F5")
+    .configure_view(strokeOpacity=0)
 )
 st.altair_chart(month_chart, use_container_width=True)
